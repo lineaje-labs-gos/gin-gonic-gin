@@ -1,0 +1,95 @@
+name: Publish Workflow
+permissions:
+  contents: read
+
+on:
+  push:
+    tag:
+      - v*
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description:  Provide the tag to publish the package
+        required: false
+      fixed_cves:
+        description:  Provide the list of CVEs fixed by this version
+        required: false
+
+jobs:
+  build_test:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_version != '' }}
+
+    steps:
+
+      - name: Check out code
+        uses: actions/checkout@v4.1.7
+        with:
+          ref: ${{ github.event.inputs.release_version }}
+          submodules: true
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./... 2>&1 | tee go-build.log
+
+      - name: Install JFrog CLI
+        run: curl -fL https://install-cli.jfrog.io | sh
+
+      - name: Upload build log to Artifactory
+        run: |
+          PROJECT_NAME=${GITHUB_REPOSITORY##*/}
+          jf rt u "go-build.log" "${{ secrets.GO_STAGING_ARTIFACTORY }}/logs/build_test/${PROJECT_NAME}-${{ github.event.inputs.release_version }}/" --url https://${{ secrets.JFROG_HOST_NAME }}/artifactory/ --access-token=${{ secrets.JFROG_PASSWORD }}
+
+      - name: Run tests if available
+        run: |
+          if go list ./... | grep -q .; then
+            go test ./... 2>&1 | tee go-test.log || echo "go test failed or no tests found"
+            PROJECT_NAME=${GITHUB_REPOSITORY##*/}
+            jf rt u "go-test.log" "${{ secrets.GO_STAGING_ARTIFACTORY }}/logs/build_test/${PROJECT_NAME}-${{ github.event.inputs.release_version }}/" --url https://${{ secrets.JFROG_HOST_NAME }}/artifactory/ --access-token=${{ secrets.JFROG_PASSWORD }}
+          else
+            echo "No packages found, skipping."
+          fi
+
+  publish:
+    needs: build_test
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_version != '' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.1.7
+        with:
+          ref: ${{ github.event.inputs.release_version }}
+          submodules: true
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install JFrog CLI
+        run: curl -fL https://install-cli.jfrog.io | sh
+
+      - name: Configure JFrog CLI for Go
+        run: |
+          jf c add gos-artifactory --url=https://${{ secrets.JFROG_HOST_NAME }}/artifactory/ --access-token=${{ secrets.JFROG_PASSWORD }} --interactive=false
+          jf go-config --repo-resolve=${{ secrets.GO_STAGING_ARTIFACTORY }} --repo-deploy=${{ secrets.GO_STAGING_ARTIFACTORY }} --server-id-resolve=gos-artifactory --server-id-deploy=gos-artifactory
+
+      - name: Publish module to JFrog
+        # --deps=all mirrors the whole resolved dependency graph into Artifactory
+        # too, so a consumer's GOPROXY never needs to reach proxy.golang.org.
+        run: jf go-publish gos-artifactory "${{ github.event.inputs.release_version }}" --self=true --deps=all 2>&1 | tee go-publish.log
+
+      - name: Upload publish log to Artifactory
+        run: |
+          PROJECT_NAME=${GITHUB_REPOSITORY##*/}
+          jf rt u "go-publish.log" "${{ secrets.GO_STAGING_ARTIFACTORY }}/logs/publish/${PROJECT_NAME}-${{ github.event.inputs.release_version }}/" --url https://${{ secrets.JFROG_HOST_NAME }}/artifactory/ --access-token=${{ secrets.JFROG_PASSWORD }}
+
+      - name: Set CVE property in Artifactory
+        run: |
+          PROJECT_NAME=${GITHUB_REPOSITORY##*/}
+          jf rt sp "${{ secrets.GO_STAGING_ARTIFACTORY }}/${PROJECT_NAME}/@v/${{ github.event.inputs.release_version }}.zip" "fixed_cves=${{ github.event.inputs.fixed_cves }}" --url https://${{ secrets.JFROG_HOST_NAME }}/artifactory/ --access-token ${{ secrets.JFROG_PASSWORD }}
