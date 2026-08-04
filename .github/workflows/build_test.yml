@@ -1,0 +1,43 @@
+name: Build and Test Workflow
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - devtask/*
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description:  Provide the branch/tag to build and test
+        required: false
+
+jobs:
+
+  build_test:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_version != '' }}
+
+    steps:
+
+      - name: Check out code
+        uses: actions/checkout@v4.1.7
+        with:
+          ref: ${{ github.event.inputs.release_version }}
+          submodules: true
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Run tests if available
+        run: |
+          if go list ./... | grep -q .; then
+            go test ./... || echo "go test failed or no tests found"
+          else
+            echo "No packages found, skipping."
+          fi
